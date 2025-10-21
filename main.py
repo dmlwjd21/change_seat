@@ -1,149 +1,192 @@
 import streamlit as st
-import random
-import numpy as np
+import math
+import pandas as pd
+import re
 
-st.set_page_config(page_title="랜덤 자리 배치기", layout="wide")
+st.set_page_config(page_title="교실 자리배치 랜덤 생성기", layout="wide")
+st.title("교실 자리배치 랜덤 생성기 🪑")
 
-st.title("🎲 학생 랜덤 자리 배치기")
+# --- Helper functions ---
 
-# --- 입력 받기 ---
-num_students = st.number_input("총 학생 수", min_value=1, step=1, value=10)
-num_cols    = st.number_input("열(가로 칸) 수", min_value=1, step=1, value=5)
+def parse_students(text):
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    # allow comma separated in a single line too
+    students = []
+    for ln in lines:
+        parts = [p.strip() for p in re.split(r"[,;]", ln) if p.strip()]
+        students.extend(parts)
+    # remove duplicates while preserving order
+    seen = set()
+    out = []
+    for s in students:
+        if s not in seen:
+            out.append(s)
+            seen.add(s)
+    return out
 
-if num_students > 0 and num_cols > 0:
-    num_rows   = (num_students + num_cols - 1) // num_cols
-    total_seats = num_rows * num_cols
-    st.markdown(f"총 `{num_rows}행 × {num_cols}열 = {total_seats}`개의 자리가 필요합니다.")
 
-# 학생 이름 목록
-students_input = st.text_area("학생 이름 목록 (한 줄에 한 명씩)", help="한 줄에 한 학생 이름 입력")
-students       = [name.strip() for name in students_input.splitlines() if name.strip()]
+def parse_groups(text):
+    # groups: each line contains members separated by commas
+    groups = []
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        parts = [p.strip() for p in ln.split(",") if p.strip()]
+        if parts:
+            groups.append(parts)
+    return groups
 
-# 떨어뜨릴 학생들 (쌍 입력)
-separated_pairs_input = st.text_area(
-    "떨어뜨릴 학생 쌍 입력 (예: 철수-영희)", 
-    help="한 줄에 한 쌍. 형식: 이름1-이름2"
-)
-separated_pairs = set()
-if separated_pairs_input:
-    for line in separated_pairs_input.splitlines():
-        if "-" in line:
-            a, b = map(str.strip, line.strip().split("-"))
-            if a and b:
-                separated_pairs.add((a, b))
 
-# 고정할 학생들 (형식: 이름:행,열)
-fixed_positions_input = st.text_area(
-    "고정할 학생들 입력 (예: 민수:2,3)", 
-    help="한 줄에 한 명. 형식: 이름:행,열"
-)
-fixed_positions = {}
-if fixed_positions_input:
-    for line in fixed_positions_input.splitlines():
-        if ":" in line and "," in line:
-            name, pos = line.strip().split(":")
-            r, c = map(int, pos.strip().split(","))
-            fixed_positions[name.strip()] = (r, c)
-
-# 빈 자리 입력 — 초기 방식
-empty_seats_input = st.text_input(
-    "빈 자리를 입력하세요 (예: 1,5 / 2,3)", 
-    help="형식: 행,열 (여러 개는 쉼표 또는 줄바꿈으로 분리)"
-)
-initial_empty_seats = set()
-if empty_seats_input:
-    for item in empty_seats_input.replace('\n', ',').split(','):
-        item = item.strip()
-        if item and ',' in item:
-            try:
-                r,c = map(int, item.split(','))
-                initial_empty_seats.add((r, c))
-            except:
-                st.warning(f"잘못된 입력: {item}")
-
-# 자리 배치 시작 버튼
-if st.button("자리 배치 시작"):
-    # 입력 검증
-    if len(students) != num_students:
-        st.error("학생 수와 이름 수가 맞지 않습니다.")
-    else:
-        seats = [(r, c) for r in range(1, num_rows+1) for c in range(1, num_cols+1)]
-        available_seats = [s for s in seats if s not in initial_empty_seats]
-
-        if len(available_seats) < len(students):
-            st.error("사용 가능한 자리가 부족합니다.")
+def parse_specifics(text):
+    # expect entries like: 이름(행,열) either comma separated or newline separated
+    entries = []
+    for ln in re.split(r"[,\n]", text):
+        ln = ln.strip()
+        if not ln:
+            continue
+        m = re.match(r"^(.+?)\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*$", ln)
+        if m:
+            name = m.group(1).strip()
+            r = int(m.group(2))
+            c = int(m.group(3))
+            entries.append((name, r, c))
         else:
-            # 고정 자리 배치
-            assigned     = {}
-            used_seats   = set()
+            # ignore malformed but keep user-friendly by showing in session
+            st.warning(f"특정 자리 지정 형식 오류: '{ln}'. 예: 홍길동(1,2)")
+    return entries
 
-            for name, pos in fixed_positions.items():
-                if pos in used_seats or pos in initial_empty_seats or pos not in seats:
-                    st.error(f"{name}의 자리 {pos}는 사용할 수 없습니다.")
-                    st.stop()
-                assigned[name] = pos
-                used_seats.add(pos)
 
-            remaining_students = [s for s in students if s not in fixed_positions]
-            remaining_seats    = [s for s in available_seats if s not in used_seats]
+def write_requirements():
+    content = """
+streamlit
+pandas
+"""
+    with open("requirements.txt", "w", encoding="utf-8") as f:
+        f.write(content.strip() + "\n")
 
-            success      = False
-            max_attempts = 1000
 
-            def is_adjacent(pos1, pos2):
-                r1, c1 = pos1
-                r2, c2 = pos2
-                return abs(r1-r2) <= 1 and abs(c1-c2) <= 1
+# --- UI: Inputs ---
+with st.sidebar:
+    st.header("입력")
+    cols = st.number_input("열 개수 (한 행의 좌석 수)", min_value=1, max_value=20, value=5, step=1)
 
-            for _ in range(max_attempts):
-                random.shuffle(remaining_students)
-                trial_assignment = dict(zip(remaining_students, remaining_seats))
-                full_assignment  = assigned.copy()
-                full_assignment.update(trial_assignment)
+    st.markdown("---")
+    st.subheader("학생 목록 (한 줄 또는 여러 줄, 쉼표 가능)")
+    students_text = st.text_area("학생 이름을 입력하세요 (예: 홍길동)", height=200, placeholder="홍길동\n김철수, 이영희\n박민수")
 
-                conflict = False
-                for a, b in separated_pairs:
-                    if a in full_assignment and b in full_assignment:
-                        if is_adjacent(full_assignment[a], full_assignment[b]):
-                            conflict = True
-                            break
+    st.subheader("사이가 안 좋은 팀 (한 줄에 한 팀, 멤버는 쉼표로 구분)")
+    groups_text = st.text_area("같은 행에 있으면 안 되는 학생 그룹을 입력하세요", height=120, placeholder="A,B,C\nD,E")
 
-                if not conflict:
-                    assigned = full_assignment
-                    success  = True
+    st.subheader("특정 자리 배치 (형식: 이름(행,열), 예: 홍길동(1,2) )")
+    specific_text = st.text_area("특정 학생을 특정 자리로 배치", height=120, placeholder="홍길동(1,1)\n이영희(2,3)")
+
+    if st.button("자리 배치 생성/갱신"):
+        st.session_state['generate'] = True
+
+    st.markdown("---")
+    if st.button("requirements.txt 파일 생성"):
+        write_requirements()
+        st.success("requirements.txt 파일을 현재 디렉터리에 생성했습니다.")
+
+# parse inputs
+students = parse_students(students_text)
+groups = parse_groups(groups_text)
+specifics = parse_specifics(specific_text)
+
+n_students = len(students)
+rows = math.ceil(n_students / cols) if n_students>0 else 0
+
+# Initialize seating in session state
+if 'seating' not in st.session_state:
+    st.session_state['seating'] = {}
+if 'rows' not in st.session_state:
+    st.session_state['rows'] = rows
+if 'cols' not in st.session_state:
+    st.session_state['cols'] = cols
+
+# If user clicked generate or if students changed, (re)generate layout
+if st.session_state.get('generate') or (st.session_state.get('rows') != rows or st.session_state.get('cols') != cols):
+    st.session_state['generate'] = False
+    st.session_state['rows'] = rows
+    st.session_state['cols'] = cols
+
+    # basic placement algorithm with group-row separation
+    seating = {(r+1, c+1): '' for r in range(max(rows,1)) for c in range(cols)}
+
+    # Fill in specifics first (they may expand rows if needed)
+    for name, r, c in specifics:
+        # expand rows if necessary
+        if r > rows:
+            # expand rows
+            extra = r - rows
+            rows = r
+            st.session_state['rows'] = rows
+            for rr in range(rows - extra + 1, rows + 1):
+                for cc in range(1, cols+1):
+                    seating.setdefault((rr,cc),'')
+        if (r,c) in seating:
+            seating[(r,c)] = name
+        else:
+            st.warning(f"지정된 자리 {(r,c)}은(는) 현재 유효 범위를 벗어납니다.")
+
+    # mark students already placed via specifics
+    placed = set([v for v in seating.values() if v])
+
+    # assign group members preferentially to different rows
+    # create buckets per row
+    row_buckets = {r+1: [] for r in range(rows)}
+
+    # First, place members of each group round-robin across rows
+    for grp in groups:
+        row_idx = 1
+        for member in grp:
+            if member in placed:
+                continue
+            # find next row with free seats
+            attempts = 0
+            while attempts < rows:
+                r = ((row_idx -1) % rows) + 1
+                # count used seats in row
+                used = sum(1 for c in range(1,cols+1) if seating.get((r,c)))
+                if used < cols:
+                    # assign to this row bucket (not exact column yet)
+                    row_buckets[r].append(member)
+                    placed.add(member)
+                    row_idx += 1
                     break
+                else:
+                    row_idx +=1
+                    attempts +=1
+            # if all rows full, leave for later
 
-            if not success:
-                st.error("제약 조건을 만족하는 배치가 만들어지지 않았습니다. 입력을 확인하세요.")
-            else:
-                st.success("자리 배치 완료 🎉")
-                # 자리표 화면 표시 + 클릭 가능한 빈 자리 지정
-                seat_grid = [["" for _ in range(num_cols)] for _ in range(num_rows)]
-                for name, (r,c) in assigned.items():
-                    seat_grid[r-1][c-1] = name
+    # remaining students (not in groups or could not place) go to a fill list
+    remaining = [s for s in students if s not in placed]
 
-                # 빈 자리 초기값 복사
-                empty_seats = set(initial_empty_seats)
+    # now flatten buckets into final ordering row by row
+    order = []
+    for r in range(1, rows+1):
+        # take bucket members first
+        order.extend(row_buckets[r])
+        # then fill with remaining up to row capacity
+        cap = cols - len(row_buckets[r])
+        take = remaining[:cap]
+        order.extend(take)
+        remaining = remaining[cap:]
 
-                st.markdown("### 자리표 (아래에서 빈 자리 클릭해 조정 가능)")
-                for r in range(1, num_rows+1):
-                    cols = st.columns(num_cols)
-                    for c in range(1, num_cols+1):
-                        idx = (r, c)
-                        if idx in empty_seats:
-                            # 빈 자리라면 버튼으로 표시
-                            if cols[c-1].button(f"🪑 빈 자리 ({r},{c})", key=f"empty_{r}_{c}"):
-                                # 클릭 시 빈자리 토글
-                                if idx in empty_seats:
-                                    empty_seats.remove(idx)
-                                else:
-                                    empty_seats.add(idx)
-                                st.experimental_rerun()
-                        elif seat_grid[r-1][c-1]:
-                            name = seat_grid[r-1][c-1]
-                            cols[c-1].markdown(f"**{name}**")
-                        else:
-                            # 할당되지 않은 자리
-                            if cols[c-1].button(f"⬜ 자리 ({r},{c})", key=f"free_{r}_{c}"):
-                                empty_seats.add(idx)
-                                st.experimental_rerun()
+    # if still remaining students, append new rows as needed
+    extra_row = rows
+    while remaining:
+        extra_row += 1
+        for c in range(1, cols+1):
+            seating.setdefault((extra_row,c),'')
+        take = remaining[:cols]
+        idx = 0
+        for name in take:
+            seating[(extra_row, idx+1)] = name
+            idx +=1
+        remaining = remaining[cols:]
+
+    # now place 'order' into seating row-major skipping specifics already placed
+    idx = 0
+    for r in range(1, max(rows,1)+1):
