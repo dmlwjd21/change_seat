@@ -118,4 +118,4 @@ if st.button("자리 배치 시작"):
                 for name, (r, c) in assigned.items():
                     seat_grid[r - 1][c - 1] = name
 
-                st.success("자리 배치 완료 🎉"
+                st.success("자리 배치 완료 🎉")
